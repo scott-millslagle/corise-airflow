@@ -1,8 +1,16 @@
 from datetime import datetime
 from typing import List
+from google.cloud import storage
 
 import pandas as pd
+import os
+from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.decorators import dag, task # DAG and task decorators for interfacing with the TaskFlow API
+
+bucket_name = "corise-airflow-scott-week-one"
+location = 'US'
+storage_class = 'STANDARD'
+client = GCSHook()
 
 @dag(
     # This defines how often your DAG will run, or the schedule by which your DAG runs. In this case, this DAG
@@ -27,6 +35,20 @@ def energy_dataset_dag():
     and load it to GCS.
 
     """
+    @task
+    def create_bucket(client, bucket_name, location, storage_class):
+
+        bucket = client.create_bucket(
+            bucket_name=bucket_name,
+            storage_class=storage_class,
+            project_id='airflow-week1',
+            location=location
+        )
+
+        print(f"Created bucket {bucket_name} in {location} with storage class {storage_class}")
+
+        return bucket
+
 
     @task
     def extract() -> List[pd.DataFrame]:
@@ -38,17 +60,19 @@ def energy_dataset_dag():
         """
         from zipfile import ZipFile
         # TODO Unzip files into pandas dataframes
+        files_zipped = ZipFile(f"{os.getenv('AIRFLOW_HOME')}/dags/data/energy-consumption-generation-prices-and-weather.zip")
+        files_unzipped = [pd.read_csv(files_zipped.open(file_name)) for file_name in files_zipped.namelist()]
+        return files_unzipped
+
 
 
     @task
-    def load(unzip_result: List[pd.DataFrame]):
+    def load(bucket_name: str, client: str, unzip_result: List[pd.DataFrame]):
         """
         #### Load task
         A simple "load" task that takes in the result of the "transform" task, prints out the 
         schema, and then writes the data into GCS as parquet files.
         """
-
-        from airflow.providers.google.cloud.hooks.gcs import GCSHook
 
         data_types = ['generation', 'weather']
 
@@ -57,12 +81,18 @@ def energy_dataset_dag():
 
         # The google cloud storage github repo has a helpful example for writing from pandas to GCS:
         # https://github.com/googleapis/python-storage/blob/main/samples/snippets/storage_fileio_pandas.py
-        
-        client = GCSHook()     \
-        # TODO Add GCS upload code
 
 
-    # TODO Add task linking logic here
+        for name, data in zip(data_types, unzip_result):
+            client.upload(bucket_name=bucket_name,
+                          object_name =name,
+                          data = data.to_parquet())
+            print(f"SUCCESS: {name} written to {bucket_name}")
+
+    # # TODO Add task linking logic here
+    create_bucket(client, bucket_name, location, storage_class) 
+    data_extract = extract()
+    load(bucket_name, client, data_extract)
 
 
 energy_dataset_dag = energy_dataset_dag()
